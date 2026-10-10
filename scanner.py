@@ -12,13 +12,17 @@ def load_state():
         try:
             with open(STATE_FILE, "r") as f:
                 return json.load(f)
-        except:
+        except Exception as e:
+            print(f"Error loading state.json: {e}")
             return {}
     return {}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Error saving state.json: {e}")
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -28,11 +32,17 @@ def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        if r.status_code != 200:
+            print(f"Telegram API Error: {r.text}")
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
 def fetch_candles(symbol, interval, size=70):
+    if not TWELVE_DATA_API_KEY:
+        print("CRITICAL ERROR: TWELVE_DATA_API_KEY secret is missing or empty!")
+        return []
+        
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={size}&timezone=UTC&apikey={TWELVE_DATA_API_KEY}"
     try:
         res = requests.get(url).json()
@@ -49,21 +59,27 @@ def fetch_candles(symbol, interval, size=70):
                     'close': float(c['close'])
                 })
             return candles
+        elif "message" in res:
+            print(f"Twelve Data API Warning for {symbol} ({interval}): {res['message']}")
     except Exception as e:
         print(f"Error fetching {symbol} {interval}: {e}")
     return []
 
 def run_radar_scan():
     state = load_state()
-    print("Starting SLK Radar scan...")
+    print("🚀 Starting SLK Radar scan across 23 pairs...")
     
-    for pair in SYMBOLS:
-        time.sleep(8)  # Rate limit safety for Twelve Data free tier
+    for idx, pair in enumerate(SYMBOLS, start=1):
+        print(f"[{idx}/{len(SYMBOLS)}] Scanning {pair}...")
         
         d1_candles = fetch_candles(pair, "1day", size=70)
+        time.sleep(8)  # Rate limit spacer between Daily and 4H requests
+        
         h4_candles = fetch_candles(pair, "4h", size=30)
+        time.sleep(8)  # Rate limit spacer before moving to next pair
         
         if not d1_candles or not h4_candles:
+            print(f"⚠️ Skipping {pair} due to missing candle data.")
             continue
             
         atr = calculate_atr(d1_candles, ATR_PERIOD)
@@ -71,6 +87,7 @@ def run_radar_scan():
         drd = evaluate_drd(d1_candles, levels, atr)
         
         if not drd:
+            print(f"  └ No active Daily Rejection (DRD) on {pair}.")
             continue
             
         # Extended Breakout Filter Check
@@ -93,10 +110,14 @@ def run_radar_scan():
                 f"• *Target:* External Range Liquidity (ERL)\n"
             )
             
+            print(f"✨ MATCH FOUND! Sending alert for {pair}...")
             send_telegram_alert(msg)
             state[alert_key] = {"pair": pair, "bias": drd['bias'], "sent_at": time.time()}
             save_state(state)
+        else:
+            print(f"  └ Setup for {pair} already alerted previously.")
+
+    print("🎉 SLK Radar scan complete!")
 
 if __name__ == "__main__":
     run_radar_scan()
-      
